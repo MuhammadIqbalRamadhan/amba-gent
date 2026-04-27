@@ -17,7 +17,9 @@ Separation of Concerns:
 Kalau mau tambah tool baru, edit 2 file: definisi + implementasi.
 """
 
-import os  # Untuk operasi file system (cek file ada, path, dll)
+import os      # Untuk operasi file system (cek file ada, path, dll)
+import difflib  # () Untuk generate diff preview
+from core.logger import debug
 
 
 def read_file(path):
@@ -90,20 +92,38 @@ def write_file(path, content):
     try:
         abs_path = os.path.abspath(path)
 
+        # () Diff Preview — kalau file sudah ada, tunjukkan perubahan
+        diff_text = ""
+        if os.path.exists(abs_path):
+            try:
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    old_content = f.read()
+                # Generate diff hanya kalau isi berubah
+                if old_content != content:
+                    diff_text = generate_diff(old_content, content, path)
+                    debug(f"Diff generated untuk {path}", tag="FILE")
+                else:
+                    debug(f"File {path} tidak berubah, skip write", tag="FILE")
+                    return f"File '{path}' tidak berubah — isi sama persis."
+            except Exception:
+                pass  # Gagal baca file lama, lanjut saja
+
         # Buat folder parent kalau belum ada
-        # Contoh: kalau path = "src/utils/helper.py"
-        # maka folder "src/utils/" akan dibuat otomatis
-        # os.path.dirname() = ambil bagian folder dari path
         parent_dir = os.path.dirname(abs_path)
-        if parent_dir:  # Hanya kalau ada parent dir
+        if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
 
         # Tulis ke file
-        # 'w' = write mode (buat baru / overwrite)
         with open(abs_path, "w", encoding="utf-8") as f:
             f.write(content)
 
-        return f"Berhasil menulis ke file '{path}' ({len(content)} karakter)"
+        debug(f"File ditulis: {abs_path} ({len(content)} karakter)", tag="FILE")
+
+        # Sertakan diff di response agar user/LLM bisa lihat perubahannya
+        result = f"Berhasil menulis ke file '{path}' ({len(content)} karakter)"
+        if diff_text:
+            result += f"\n\n=== DIFF PREVIEW ===\n{diff_text}"
+        return result
 
     except PermissionError:
         return f"Error: Tidak punya izin untuk menulis ke '{path}'"
@@ -187,3 +207,69 @@ def list_directory(path="."):
         return f"Error: Tidak punya izin untuk membaca direktori '{path}'"
     except Exception as e:
         return f"Error membaca direktori '{path}': {e}"
+
+
+def generate_diff(old_content, new_content, filename="file"):
+    """
+    Generate unified diff antara konten lama vs konten baru.
+
+    === APA ITU DIFF? ===
+    Diff = tampilan perubahan antara 2 versi file.
+    Mirip seperti yang kamu lihat di GitHub atau git diff.
+
+    Format:
+    - Baris yang dihapus ditandai dengan "-" (merah di terminal)
+    - Baris yang ditambah ditandai dengan "+" (hijau di terminal)
+    - Baris yang tidak berubah ditandai dengan " " (spasi)
+
+    Contoh output:
+        --- file.py (sebelum)
+        +++ file.py (sesudah)
+        @@ -1,3 +1,4 @@
+         import os
+        -import sys
+        +import sys
+        +import json
+         def main():
+
+    Parameter:
+    - old_content: isi file sebelum diubah
+    - new_content: isi file sesudah diubah
+    - filename: nama file (untuk header diff)
+
+    Return:
+    - String diff dalam format unified, atau pesan "tidak ada perubahan"
+
+    === LIBRARY DIFFLIB ===
+    difflib adalah library BAWAAN Python (tidak perlu pip install).
+    unified_diff() menghasilkan format yang sama seperti `git diff`.
+    """
+    # splitlines(keepends=True) = pecah per baris, pertahankan newline
+    # Ini penting agar diff bisa menampilkan baris mana yang berubah
+    old_lines = old_content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
+
+    # unified_diff() menghasilkan generator (iterable) baris-baris diff
+    # fromfile/tofile = label untuk header
+    # n=3 = tampilkan 3 baris context di sekitar perubahan
+    diff = difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=f"{filename} (sebelum)",
+        tofile=f"{filename} (sesudah)",
+        n=3,  # jumlah baris context
+    )
+
+    # Gabungkan semua baris diff jadi satu string
+    diff_text = "".join(diff)
+
+    if not diff_text:
+        return "(tidak ada perubahan)"
+
+    # Batasi panjang diff agar tidak terlalu panjang
+    max_diff_len = 3000
+    if len(diff_text) > max_diff_len:
+        diff_text = diff_text[:max_diff_len] + "\n... (diff terlalu panjang, dipotong)"
+
+    return diff_text
+

@@ -1,48 +1,50 @@
 # -*- coding: utf-8 -*-
 """
-core/logger.py — Centralized Debug Logger untuk Amba-Gent
+core/logger.py -- Centralized Debug Logger untuk Amba-Gent
 
-=== APA INI? ===
-File ini menyediakan SATU TEMPAT untuk semua debug logging di seluruh project.
-Sebelumnya, fungsi print_debug() hanya ada di main.py.
-Sekarang kita pindahkan ke sini agar SEMUA module bisa pakai.
+Semua debug log di seluruh project menggunakan fungsi debug() dari file ini.
+Dikontrol oleh DEBUG=true/false di .env.
 
-=== KENAPA CENTRALIZED? ===
-Kalau setiap file punya print_debug() sendiri-sendiri:
-- Susah mengubah format log (harus edit banyak file)
-- Susah matikan debug (harus edit banyak file)
-- Tidak konsisten (tiap file format beda-beda)
-
-Dengan centralized logger:
-- Ubah format di 1 tempat → semua module ikut berubah
-- Settings DEBUG dari .env → 1x cek, berlaku di mana-mana
-- Konsisten: semua log tampil dengan format yang sama
-
-=== CARA PAKAI DI MODULE LAIN ===
-    from core.logger import debug
-
-    debug("🔍 Sedang membaca file...", tag="FILE_TOOLS")
-    #  DEBUG [FILE_TOOLS] 🔍 Sedang membaca file...
-
-=== KENAPA PAKAI TAG? ===
-Tag menunjukkan dari module MANA log itu berasal.
-Ini penting untuk debugging — supaya mas Rusdi tahu
-log mana dari file mana. Contoh:
-    DEBUG [LLM]       → dari core/llm_client.py
-    DEBUG [EXECUTOR]  → dari tools/executor.py
-    DEBUG [RAG]       → dari rag/retriever.py
-    DEBUG [CONTEXT]   → dari core/context.py
-    DEBUG [AGENT]     → dari main.py (agent loop)
+Tag menunjukkan asal module:
+    [LLM]       -> core/llm_client.py
+    [EXECUTOR]  -> tools/executor.py
+    [RAG]       -> rag/retriever.py
+    [CONTEXT]   -> core/context.py
+    [AGENT]     -> main.py (agent loop)
+    [STARTUP]   -> main.py (inisialisasi)
+    [SESSION]   -> core/session.py
+    [PROJECT]   -> core/project.py
+    [FILE]      -> tools/file_tools.py
+    [STREAM]    -> main.py (streaming display)
 """
+
+import sys
+import os
+
+# Force UTF-8 output di Windows agar emoji tidak error
+# Windows legacy terminal pakai cp1252 yang tidak support emoji
+if sys.platform == "win32":
+    # Set environment variable agar Python pakai UTF-8
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    # Reconfigure stdout/stderr ke UTF-8 kalau memungkinkan
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 from rich.console import Console
 from config import DEBUG
 
 # Console instance yang di-share oleh semua module
-# Kenapa tidak buat Console() baru di setiap file?
-# Karena Rich Console menyimpan state (width, color support, dll).
-# Lebih efisien dan konsisten pakai satu instance.
-console = Console()
+# force_terminal=True memastikan Rich selalu output warna
+# highlight=False mencegah Rich auto-highlight angka/URL yang tidak diinginkan
+console = Console(force_terminal=True, highlight=False)
 
 
 def debug(msg, tag="GENERAL"):
@@ -53,42 +55,52 @@ def debug(msg, tag="GENERAL"):
     - msg: pesan yang ingin ditampilkan (string)
     - tag: label asal module (string), contoh: "LLM", "RAG", "AGENT"
 
-    Format output:
-         DEBUG [TAG] pesan di sini
-
-    Warna:
-    - Label " DEBUG " → background magenta (mencolok, mudah dikenali)
-    - Tag [TAG]       → kuning (menunjukkan asal module)
-    - Pesan           → dim italic (tidak mengganggu output utama)
-
     Contoh:
         debug("Mengirim 5 messages ke LLM", tag="LLM")
-        →  DEBUG [LLM] Mengirim 5 messages ke LLM
-    """
-    if not DEBUG:
-        return  # Kalau DEBUG=false di .env, langsung return (tidak cetak apapun)
-
-    console.print(
-        f"[dim white on magenta] DEBUG [/dim white on magenta] "
-        f"[bold yellow][{tag}][/bold yellow] "
-        f"[dim italic]{msg}[/dim italic]"
-    )
-
-
-def debug_separator(label=""):
-    """
-    Cetak garis pemisah untuk memudahkan pembacaan log debug.
-
-    Contoh output:
-        ──────────── AGENT LOOP DIMULAI ────────────
-
-    Berguna untuk memisahkan "sesi" dalam debug log,
-    misalnya setiap kali agent loop berputar.
+        ->  DEBUG [LLM] Mengirim 5 messages ke LLM
     """
     if not DEBUG:
         return
 
+    # Sanitize msg: replace problematic characters for legacy Windows terminals
+    safe_msg = _sanitize_for_terminal(msg)
+
+    console.print(
+        f"[dim white on magenta] DEBUG [/dim white on magenta] "
+        f"[bold yellow][{tag}][/bold yellow] "
+        f"[dim italic]{safe_msg}[/dim italic]"
+    )
+
+
+def debug_separator(label=""):
+    """Cetak garis pemisah untuk memudahkan pembacaan log debug."""
+    if not DEBUG:
+        return
+
     if label:
-        console.print(f"[dim]{'─' * 12} {label} {'─' * 12}[/dim]")
+        safe_label = _sanitize_for_terminal(label)
+        console.print(f"[dim]{'-' * 12} {safe_label} {'-' * 12}[/dim]")
     else:
-        console.print(f"[dim]{'─' * 40}[/dim]")
+        console.print(f"[dim]{'-' * 40}[/dim]")
+
+
+def _sanitize_for_terminal(text):
+    """
+    Bersihkan karakter yang tidak bisa di-encode oleh Windows legacy terminal.
+
+    Windows cmd/PowerShell sering pakai encoding cp1252 yang tidak support:
+    - Emoji (checkmark, arrows, dll)
+    - Box-drawing characters
+    - Beberapa karakter Unicode lainnya
+
+    Solusi: encode/decode dengan errors='replace' → karakter bermasalah
+    diganti dengan '?' supaya tidak crash.
+    """
+    try:
+        # Coba encode ke terminal encoding, replace yang gagal
+        return text.encode(sys.stdout.encoding or "utf-8", errors="replace").decode(
+            sys.stdout.encoding or "utf-8", errors="replace"
+        )
+    except Exception:
+        # Kalau masih gagal, fallback ke ASCII
+        return text.encode("ascii", errors="replace").decode("ascii")

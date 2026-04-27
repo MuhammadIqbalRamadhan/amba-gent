@@ -28,6 +28,15 @@ Amba-gent adalah asisten AI Engineer pribadi berbasis *Command Line Interface* (
 - **🐛 Transparansi Pikiran (Watchlist & Debug Mode)**
   Sebuah sakelar toggle `DEBUG_MODE=True`, memperbolehkan pengguna melihat visualisasi bagaimana "otak" representatif mesin menganalisis problem dari 1 hingga proses pengembalian pesan secara elegan.
 
+- **🌊 Streaming Output (Typewriter Effect)**
+  Tampilan jawaban akhir AI diproses secara elegan dengan memberikan efek "mengetik" menggunakan sinkronisasi waktu dan *Rich Live* render, memberikan Anda *User Experience* interaksi natural alih-alih menampilkan blok teks kaku.
+
+- **💾 Manajemen Sesi Persisten (Auto-Save)**
+  Setiap interaksi obrolan akan otomatis tersimpan ke dalam format penyimpanan lokal di `sessions/`. Anda dapat menggunakan perintah argument `--resume` untuk meneruskan konteks riwayat percakapan secara mulus meskipun aplikasi sempat tertutup!
+
+- **🤖 Deteksi Lingkungan Project (Auto-Context)**
+  Sistem dibekali kemampuan "merasakan" direktori kerjanya secara mandiri. AI mendeteksi status Git-enabled maupun bahasa dominan (Python, JS, etc.) yang sedang diawasi lalu menyuntikkan *system prompt* yang dinamis dan relevan terhadap kode Anda secara cerdas.
+
 ## 🚀 Persiapan dan Cara Instalasi
 
 Pastikan Anda memiliki instalasi Python 3.11 atau ke atas.
@@ -51,11 +60,15 @@ Pastikan Anda memiliki instalasi Python 3.11 atau ke atas.
 
 4. **Jalankan Amba-gent**
    ```bash
-   # Masuk ke portal Amba-gent dan tuliskan instruksi kode 
+   # Masuk ke portal Amba-gent dan mulai task baru
    py -3 main.py
-   # atau
-   python3 main.py
+
+   # Atau, teruskan percakapan sebelumnya jika ada project yang belum tuntas:
+   py -3 main.py --resume
    ```
+
+   **💡 TIPS PRO (Penggunaan Lintas-Project):** Anda telah dapat memanggil `amba-gent` langsung di PowerShell manapun menggunakan ALIAS GLOBAL! 
+   Hanya dengan mengetikkan perintah `ambagent` di dalam terminal dari modul lain yang sedang Anda kerjakan, AI akan datang dan menganalisa direktori spesifik tersebut seketika.
 
 5. Interaksikan langsung dengan mengetik instruksi. Anda bisa menggunakan *"Tolong beri komentar di auth.py"* atau *"Cari modul untuk parsing log"*. 
 

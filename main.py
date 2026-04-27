@@ -2,27 +2,33 @@
 """
 main.py — Entry Point untuk Amba-Gent
 
-Agent loop dengan centralized debug logging.
-Semua debug log sekarang menggunakan core/logger.py (dikontrol dari .env).
-
 CARA PAKAI:
-    py -3 main.py
+    py -3 main.py              ← mulai sesi baru
+    py -3 main.py --resume     ← lanjutkan sesi terakhir
 """
 
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.live import Live
+from rich.text import Text
+import sys
 
 from core.llm_client import LLMClient
 from core.context import ContextManager
+from core.session import SessionManager
+from core.project import detect_project, generate_project_context
 from core.logger import debug, debug_separator, console
 from config import DEBUG
 from tools.definitions import TOOLS, DANGEROUS_TOOLS
 from tools.executor import execute_tool
 
 
-# System prompt — instruksi untuk LLM
-SYSTEM_PROMPT = """Kamu adalah amba-gent, asisten AI pribadi yang sangat cerdas, ahli dalam Full-Stack Development, serta mahir dalam analisis sistem.
+# ============================================================
+# SYSTEM PROMPT — sekarang dengan project context
+# ============================================================
+
+BASE_SYSTEM_PROMPT = """Kamu adalah amba-gent, asisten AI pribadi yang sangat cerdas, ahli dalam Full-Stack Development, serta mahir dalam analisis sistem.
 
 ATURAN KOMUNIKASI (WAJIB DITAATI):
 1. Panggilan Pengguna: Kamu WAJIB memanggil pengguna dengan sebutan "mas rusdi" di setiap awal, tengah, atau akhir kalimat yang relevan. Dilarang keras menggunakan sebutan "bro", "kak", "bapak", atau "anda".
@@ -32,7 +38,7 @@ ATURAN KOMUNIKASI (WAJIB DITAATI):
 KEMAMPUAN TOOLS:
 Kamu punya akses ke beberapa tools untuk membaca dan memodifikasi kode:
 - read_file: Baca isi file
-- write_file: Tulis/buat file
+- write_file: Tulis/buat file (menampilkan diff preview otomatis)
 - list_directory: Lihat isi folder
 - search_code: Cari teks di dalam project (exact match)
 - search_codebase: Cari kode yang relevan secara semantik (RAG)
@@ -42,26 +48,87 @@ Jangan minta user untuk menunjukkan isi file — langsung baca sendiri pakai too
 """
 
 
-# Inisialisasi context manager
+# Inisialisasi global
 ctx_manager = ContextManager(max_tokens=128000, reserve_for_response=4096)
+session_mgr = SessionManager()
 
 
-def agent_loop(llm, messages):
+def build_system_prompt():
     """
-    AGENT LOOP — Jantung dari amba-gent.
-    Sekarang setiap langkah di-log ke debug output.
+    Fungsi untuk membangun "System Prompt".
+    
+    Apa itu System Prompt?
+    Ini adalah instruksi rahasia utama yang dibaca oleh AI SEBELUM dia menjawab chat Anda.
+    Di sini kita menggabungkan instruksi standar Amba-gent (BASE_SYSTEM_PROMPT) dengan 
+    informasi otomatis tentang deteksi framework proyek Anda (project_context_info).
+    Dengan trik ini, AI selalu tahu apakah Anda sedang ngoding pakai Python, PHP, JS, dll.
     """
-    loop_count = 0  # Hitung berapa kali loop berputar
+    project_info = detect_project(".")
+    project_context = generate_project_context(project_info)
+    return BASE_SYSTEM_PROMPT + project_context
+
+
+def stream_display(jawaban):
+    """
+    Tampilkan jawaban dengan efek streaming (typewriter effect).
+
+    MENGAPA MENGGUNAKAN SIMULASI TYPEWRITER?
+    Secara bawaan, LLM bisa mengirim respon sepotong-sepotong (streaming).
+    Namun, karena Amba-Gent memakai alat/tools, agen BISA SAJA perlu memanggil tool 
+    terlebih dulu lalu mengamati hasilnya. 
+    
+    Kita HARUS menunggu agen untuk BENAR-BENAR SELESAI bekerja menyusun jawaban akhir.
+    Setelah jawaban selesai dievaluasi penuh, barulah jawaban utuh tersebut dipotong 
+    kecil-kecil dan dicetak otomatis dengan efek animasi "mengetik" menggunakan 
+    bantuan library "Rich Live".
+    Hal ini menjamin UX (User Experience) yang mulus layaknya sedang dichat oleh orang asli!
+
+    Parameter:
+    - jawaban: Keseluruhan jawaban gabungan (string) yang akan dirender secara stream.
+    """
+    import time
+
+    debug("🌊 Menampilkan jawaban dengan streaming effect...", tag="STREAM")
+
+    console.print()
+    console.print("[bold green]Amba-Gent >[/bold green]")
+
+    # Pecah jawaban menjadi "chunks" (potongan-potongan kecil)
+    # Simulasi streaming: tampilkan sedikit demi sedikit
+    chunk_size = 15  # Karakter per chunk
+    displayed = ""
+
+    with Live(Text(""), console=console, refresh_per_second=15) as live:
+        for i in range(0, len(jawaban), chunk_size):
+            displayed += jawaban[i:i + chunk_size]
+            live.update(Markdown(displayed))
+            time.sleep(0.02)  # Delay kecil untuk efek "mengetik"
+
+    console.print()  # Baris kosong
+    debug(f"Streaming display selesai: {len(jawaban)} karakter", tag="STREAM")
+
+
+def agent_loop(llm, messages, system_prompt):
+    """
+    AGENT LOOP (Siklus Agen) — Inilah Jantung Utama aplikasi Amba-gent!
+
+    PERBEDAAN "Chatbot biasa" dengan "AI AGENT":
+    - Chatbot: Anda bertanya -> AI langsung menjawab (1 Fase).
+    - AI Agent: Anda bertanya -> AI mikir -> AI mutusin panggil Tool (misal baca database) -> 
+      Aplikasi nge-return data -> AI mikir lagi dari awal -> Baru AI jawab berdasar data.
+      
+    Fungsi siklus (while loop) ini mengawal proses mandiri di atas terus berputar maju 
+    sampai akhirnya LLM berkata "Oke aku sudah punya jawaban akhir" (end_turn).
+    """
+    loop_count = 0
 
     while True:
         loop_count += 1
         debug_separator(f"AGENT LOOP — Iterasi #{loop_count}")
 
-        # ============================================================
         # STEP 1: Context Management
-        # ============================================================
         debug("📋 [STEP 1] Memeriksa context window...", tag="AGENT")
-        ctx_result = ctx_manager.prepare_messages(messages, SYSTEM_PROMPT)
+        ctx_result = ctx_manager.prepare_messages(messages, system_prompt)
         safe_messages = ctx_result["messages"]
 
         debug(
@@ -71,55 +138,51 @@ def agent_loop(llm, messages):
             tag="AGENT"
         )
 
-        # ============================================================
-        # STEP 2: Kirim messages ke LLM
-        # ============================================================
+        # STEP 2: Kirim ke LLM (non-streaming karena perlu cek tool_use)
         debug("📤 [STEP 2] Mengirim messages ke LLM...", tag="AGENT")
         with console.status("[bold green]Tunggu sebentar ya mas rusdi...", spinner="dots"):
             response = llm.send(
                 messages=safe_messages,
-                system=SYSTEM_PROMPT,
+                system=system_prompt,
                 tools=TOOLS,
             )
         debug(f"📥 Response diterima: stop_reason=\"{response.stop_reason}\"", tag="AGENT")
 
-        # ============================================================
-        # STEP 3: Proses response
-        # ============================================================
+        # STEP 3: Menganalisa hasil tanggapan (Response) dari LLM
+        # Nilai properti "stop_reason" mengisyaratkan kenapa LLM berhenti menjerit text.
 
-        # --- Kasus A: LLM selesai menjawab ---
+        # --- Kasus A: LLM Memutuskan Selesai Menjawab (end_turn) ---
+        # Ini berarti AI merasa sudah menyelesaikan tugas, dan teks "content" balasan
+        # merupakan text manusia murni (bukan kode instruksi tool).
         if response.stop_reason == "end_turn":
-            debug("✅ [STEP 3a] stop_reason=end_turn → LLM selesai, menyiapkan jawaban...", tag="AGENT")
+            debug("✅ [STEP 3a] stop_reason=end_turn → jawaban akhir", tag="AGENT")
 
             jawaban = ""
             for block in response.content:
                 if hasattr(block, "text"):
                     jawaban += block.text
 
-            debug(f"Panjang jawaban: {len(jawaban)} karakter", tag="AGENT")
             messages.append({"role": "assistant", "content": response.content})
             debug_separator("AGENT LOOP SELESAI")
 
             return jawaban
 
-        # --- Kasus B: LLM mau pakai tool ---
+        # --- Kasus B: LLM Ingin Menggunakan Alat Bantu (tool_use) ---
+        # Ini artinya AI sedang "berpikir" dan menyuruh kita:
+        # "Tolong program, tolong jalankan perintah tool X pakai parameter Y untukku!"
         if response.stop_reason == "tool_use":
-            debug("⚙️ [STEP 3b] stop_reason=tool_use → LLM ingin pakai tool!", tag="AGENT")
+            debug("⚙️ [STEP 3b] stop_reason=tool_use → eksekusi tool", tag="AGENT")
 
-            # Hitung berapa tool yang diminta
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             text_blocks = [b for b in response.content if hasattr(b, "text") and b.text]
             debug(f"  Content blocks: {len(tool_blocks)} tool_use, {len(text_blocks)} text", tag="AGENT")
 
-            # Simpan response LLM ke history
             messages.append({"role": "assistant", "content": response.content})
 
-            # Tampilkan teks "pemikiran" LLM kalau ada
             for block in text_blocks:
                 debug(f"  💭 Pemikiran LLM: \"{block.text[:100]}...\"", tag="AGENT")
                 console.print(f"[dim italic]{block.text}[/dim italic]")
 
-            # Proses setiap tool
             tool_results = []
 
             for idx, block in enumerate(tool_blocks, 1):
@@ -128,37 +191,29 @@ def agent_loop(llm, messages):
                 tool_use_id = block.id
 
                 debug_separator(f"TOOL #{idx}: {tool_name}")
-                debug(f"  Nama      : {tool_name}", tag="AGENT")
-                debug(f"  Input     : {_format_params(tool_input)}", tag="AGENT")
-                debug(f"  Tool ID   : {tool_use_id}", tag="AGENT")
+                debug(f"  Nama : {tool_name}", tag="AGENT")
+                debug(f"  Input: {_format_params(tool_input)}", tag="AGENT")
 
-                # Cek apakah tool berbahaya
                 if tool_name in DANGEROUS_TOOLS:
-                    debug(f"  ⚠️ Tool '{tool_name}' masuk kategori DANGEROUS!", tag="AGENT")
-                    debug(f"  Meminta konfirmasi user...", tag="AGENT")
-
+                    debug(f"  ⚠️ Tool berbahaya! Minta konfirmasi...", tag="AGENT")
                     if not _ask_confirmation(tool_name, tool_input):
-                        debug(f"  ❌ User MENOLAK eksekusi tool!", tag="AGENT")
+                        debug(f"  ❌ User menolak!", tag="AGENT")
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tool_use_id,
                             "content": "User menolak eksekusi tool ini."
                         })
                         continue
-                    else:
-                        debug(f"  ✅ User MENYETUJUI eksekusi tool", tag="AGENT")
+                    debug(f"  ✅ User menyetujui", tag="AGENT")
 
-                # Eksekusi tool
-                debug(f"  ⏳ Mengeksekusi {tool_name}...", tag="AGENT")
+                debug(f"  ⏳ Mengeksekusi...", tag="AGENT")
                 result = execute_tool(tool_name, tool_input)
 
-                # Truncate hasil kalau terlalu panjang
                 original_len = len(result)
                 result = ctx_manager.truncate_text(result, max_chars=50000)
                 if len(result) < original_len:
-                    debug(f"  ✂️ Hasil di-truncate: {original_len} → {len(result)} karakter", tag="AGENT")
+                    debug(f"  ✂️ Truncated: {original_len} → {len(result)} chars", tag="AGENT")
 
-                # Preview hasil di debug
                 preview = result[:200] + "..." if len(result) > 200 else result
                 debug(f"  📄 Preview: {preview}", tag="AGENT")
 
@@ -168,13 +223,12 @@ def agent_loop(llm, messages):
                     "content": result,
                 })
 
-            # Kirim hasil tool ke LLM
             debug(f"📤 [STEP 4] Mengirim {len(tool_results)} tool result(s) ke LLM...", tag="AGENT")
             messages.append({"role": "user", "content": tool_results})
-            debug("🔄 Mengulang agent loop (LLM akan membaca hasil tool)...", tag="AGENT")
+            debug("🔄 Mengulang agent loop...", tag="AGENT")
             continue
 
-        # --- Kasus C: stop_reason tidak dikenali ---
+        # --- Kasus C: tidak dikenali ---
         debug(f"⚠️ stop_reason tidak dikenali: \"{response.stop_reason}\"", tag="AGENT")
         jawaban = ""
         for block in response.content:
@@ -185,7 +239,7 @@ def agent_loop(llm, messages):
 
 
 def _format_params(params):
-    """Format parameter tool agar mudah dibaca di terminal."""
+    """Format parameter tool agar mudah dibaca."""
     parts = []
     for key, value in params.items():
         str_value = str(value)
@@ -196,7 +250,7 @@ def _format_params(params):
 
 
 def _ask_confirmation(tool_name, tool_input):
-    """Minta konfirmasi user sebelum menjalankan tool yang berbahaya."""
+    """Minta konfirmasi user sebelum menjalankan tool berbahaya."""
     console.print(f"\n  [bold red]⚠️  Tool '{tool_name}' akan mengubah file![/bold red]")
 
     for key, value in tool_input.items():
@@ -214,17 +268,24 @@ def _ask_confirmation(tool_name, tool_input):
 
 
 def main():
-    """Entry point utama amba-gent."""
-
+    """
+    Entry point utama amba-gent.
+    """
     debug_separator("AMBA-GENT STARTUP")
     debug(f"Debug mode: {'AKTIF ✅' if DEBUG else 'NONAKTIF'}", tag="STARTUP")
 
+    # (.4) Deteksi project
+    debug("Mendeteksi jenis project...", tag="STARTUP")
+    system_prompt = build_system_prompt()
+
     # Tampilkan header
+    project_info = detect_project(".")
     console.print(
         Panel.fit(
             "[bold cyan]🤖 Amba-Gent[/bold cyan] — AI Coding Agent\n"
             "[dim]Ketik pesan untuk mulai. Ketik 'exit' untuk keluar.[/dim]\n"
-            "[dim]Agent bisa membaca, menulis, dan mencari kode di project kamu.[/dim]",
+            "[dim]Agent bisa membaca, menulis, dan mencari kode di project kamu.[/dim]\n"
+            f"[dim]Project: {project_info['summary']}[/dim]",
             border_style="cyan",
         )
     )
@@ -236,15 +297,28 @@ def main():
         console.print("[green]✓ Terhubung ke LLM[/green]")
         console.print(f"[dim]  Tools aktif: {', '.join(t['name'] for t in TOOLS)}[/dim]")
         console.print(f"[dim]  Debug mode : {'AKTIF' if DEBUG else 'NONAKTIF'}[/dim]\n")
-        debug(f"Tools terdaftar: {[t['name'] for t in TOOLS]}", tag="STARTUP")
     except Exception as e:
         debug(f"❌ Gagal koneksi: {e}", tag="STARTUP")
         console.print(f"[bold red]✗ Gagal koneksi:[/bold red] {e}")
         return
 
-    # Conversation history
+    # (.3) Session management — cek apakah mau resume
     messages = []
-    debug("Chat loop dimulai, menunggu input user...", tag="STARTUP")
+    resume_mode = "--resume" in sys.argv
+
+    if resume_mode:
+        debug("Mode resume: memuat session terakhir...", tag="SESSION")
+        loaded = session_mgr.load_latest()
+        if loaded:
+            messages = loaded["messages"]
+            console.print(f"[green]✓ Session dilanjutkan:[/green] {loaded['id']} ({len(messages)} messages)")
+        else:
+            console.print("[yellow]Tidak ada session sebelumnya. Memulai sesi baru.[/yellow]")
+            session_mgr.new_session()
+    else:
+        session_mgr.new_session()
+
+    debug("Chat loop dimulai...", tag="STARTUP")
 
     while True:
         try:
@@ -260,21 +334,18 @@ def main():
         if not user_input.strip():
             continue
 
-        # Log input user
         debug_separator("INPUT USER BARU")
         debug(f"User input: \"{user_input[:100]}{'...' if len(user_input) > 100 else ''}\"", tag="AGENT")
-        debug(f"Panjang input: {len(user_input)} karakter", tag="AGENT")
 
         messages.append({"role": "user", "content": user_input})
-        debug(f"Total messages di history: {len(messages)}", tag="AGENT")
 
         try:
-            jawaban = agent_loop(llm, messages)
+            jawaban = agent_loop(llm, messages, system_prompt)
 
-            console.print()
-            console.print("[bold green]Amba-Gent >[/bold green]")
-            console.print(Markdown(jawaban))
-            console.print()
+            stream_display(jawaban)
+
+            session_mgr.save(messages)
+            debug("Session auto-saved ✓", tag="SESSION")
 
         except ConnectionError as e:
             debug(f"❌ ConnectionError: {e}", tag="AGENT")

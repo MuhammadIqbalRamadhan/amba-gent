@@ -2,13 +2,14 @@
 """
 core/llm_client.py — Wrapper untuk berkomunikasi dengan LLM
 
-=== PERUBAHAN DI PHASE 3 ===
-Di Phase 1, class ini cuma kirim pesan biasa (teks masuk, teks keluar).
-Sekarang kita tambahkan kemampuan TOOL CALLING:
-- Method send() sekarang menerima parameter tools=[]
-- Method baru: send_with_tools() — kirim pesan + daftar tools yang tersedia
+===  UPDATE: STREAMING ===
+Sekarang ada 2 cara kirim pesan ke LLM:
+1. send()        — non-streaming, dapat response utuh (dipakai untuk tool calling)
+2. send_stream() — streaming, jawaban muncul token-per-token (dipakai saat end_turn)
 
-=== ALUR TOOL CALLING ===
+Kenapa perlu 2 method?
+- Tool calling butuh response utuh (untuk baca ToolUseBlock)
+- Tapi jawaban akhir enaknya streaming (biar user tidak nunggu lama)
 1. Kita kirim messages + tools ke LLM
 2. LLM bisa merespons dengan 2 cara:
    a. "end_turn"  → LLM menjawab dengan teks biasa (selesai)
@@ -117,6 +118,71 @@ class LLMClient:
         except Exception as e:
             debug(f"❌ API ERROR: {e}", tag="LLM")
             raise ConnectionError(f"Gagal menghubungi LLM: {e}")
+
+    def send_stream(self, messages, system="", max_tokens=4096):
+        """
+        Kirim messages ke LLM dan terima jawaban secara STREAMING.
+
+        === APA ITU STREAMING? ===
+        Tanpa streaming :
+            User menunggu 5 detik... → semua teks muncul sekaligus. Lambat!
+
+        Dengan streaming:
+            Teks muncul satu-per-satu seperti diketik. Terasa cepat dan interaktif!
+
+        Streaming bekerja seperti air yang mengalir dari keran:
+        - Non-stream = tunggu ember penuh baru dikasih
+        - Stream = air langsung mengalir saat keran dibuka
+
+        === KAPAN DIPAKAI? ===
+        Hanya untuk menampilkan jawaban AKHIR (setelah semua tool selesai).
+        TIDAK bisa dipakai saat tool calling karena kita butuh response utuh.
+
+        === CARA KERJA ===
+        Menggunakan "generator" Python (fungsi dengan yield).
+        yield = kirim data satu-per-satu, TANPA menunggu selesai.
+
+        Contoh:
+            for token in llm.send_stream(messages, system):
+                print(token, end="")  # cetak token satu per satu
+
+        Parameter:
+        - messages : list percakapan
+        - system   : system prompt
+        - max_tokens: batas panjang jawaban
+
+        Yield:
+        - String token (potongan teks kecil, biasanya 1-5 kata)
+        """
+        try:
+            debug("Memulai streaming response dari LLM...", tag="LLM")
+
+            # Siapkan parameter
+            params = {
+                "model": self.model,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            }
+
+            if system:
+                params["system"] = system
+
+            # === STREAMING API ===
+            # .stream() mengembalikan context manager yang menghasilkan event
+            # Setiap event bisa berisi:
+            # - text delta (potongan teks baru)
+            # - content block start/stop
+            # - message start/stop
+            with self.client.messages.stream(**params) as stream:
+                for text in stream.text_stream:
+                    # text = potongan kecil teks (misal "Halo ", "mas ", "Rusdi")
+                    yield text  # Langsung kirim ke pemanggil
+
+            debug("Streaming selesai ✓", tag="LLM")
+
+        except Exception as e:
+            debug(f"❌ Streaming API ERROR: {e}", tag="LLM")
+            raise ConnectionError(f"Gagal streaming dari LLM: {e}")
 
     def get_text_response(self, messages, system=""):
         """
