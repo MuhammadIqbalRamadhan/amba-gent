@@ -253,12 +253,52 @@ def _ask_confirmation(tool_name, tool_input):
     """Minta konfirmasi user sebelum menjalankan tool berbahaya."""
     console.print(f"\n  [bold red]⚠️  Tool '{tool_name}' akan mengubah file![/bold red]")
 
-    for key, value in tool_input.items():
-        if key == "content":
-            preview = str(value)[:100] + "..." if len(str(value)) > 100 else value
-            console.print(f"  [yellow]  {key}: {preview}[/yellow]")
+    # Khusus untuk write_file, tampilkan diff preview (seperti git log)
+    if tool_name == "write_file" and "path" in tool_input and "content" in tool_input:
+        path = tool_input["path"]
+        new_content = str(tool_input["content"])
+        
+        console.print(f"  [yellow]  path: {path}[/yellow]")
+        
+        import os
+        from tools.file_tools import generate_diff
+        
+        abs_path = os.path.abspath(path)
+        if os.path.exists(abs_path):
+            try:
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    old_content = f.read()
+                
+                diff_text = generate_diff(old_content, new_content, path)
+                
+                if diff_text == "(tidak ada perubahan)":
+                    console.print(f"  [dim italic]  (Isi file sama persis, tidak ada perubahan)[/dim italic]")
+                else:
+                    console.print(f"  [bold cyan]=== DIFF PREVIEW ===[/bold cyan]")
+                    # Tampilkan diff dengan pewarnaan ala Git
+                    for line in diff_text.splitlines():
+                        if line.startswith("+") and not line.startswith("+++"):
+                            console.print(f"  [green]{line}[/green]")
+                        elif line.startswith("-") and not line.startswith("---"):
+                            console.print(f"  [red]{line}[/red]")
+                        elif line.startswith("@@"):
+                            console.print(f"  [cyan]{line}[/cyan]")
+                        else:
+                            console.print(f"  {line}")
+                            
+            except Exception as e:
+                console.print(f"  [dim]  Gagal membaca preview diff: {e}[/dim]")
         else:
-            console.print(f"  [yellow]  {key}: {value}[/yellow]")
+            console.print(f"  [bold green]  [NEW FILE] File baru akan dibuat.[/bold green]")
+            
+    else:
+        # Fallback untuk tool lain (kalau ada)
+        for key, value in tool_input.items():
+            if key == "content":
+                preview = str(value)[:100] + "..." if len(str(value)) > 100 else value
+                console.print(f"  [yellow]  {key}: {preview}[/yellow]")
+            else:
+                console.print(f"  [yellow]  {key}: {value}[/yellow]")
 
     try:
         jawab = console.input("  [bold]Lanjutkan? (y/n): [/bold]")
