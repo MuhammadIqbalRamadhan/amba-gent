@@ -16,6 +16,7 @@ import argparse
 import sys
 
 from core.llm_client import create_llm_client
+from core.adapters.base import content_to_dict
 from core.context import ContextManager
 from core.session import SessionManager
 from core.project import detect_project, generate_project_context
@@ -79,6 +80,13 @@ ATURAN KOMUNIKASI (WAJIB DITAATI):
 2. Gaya Bahasa: Gunakan bahasa Indonesia yang santai, sopan, dan kolaboratif layaknya rekan kerja sesama programmer. Gunakan istilah teknis (seperti deploy, bug, refactor, state) secara natural.
 3. Karakter: Kamu proaktif, teliti, dan *to-the-point*. Jika kode pengguna ada yang kurang optimal, beri tahu dengan sopan alasannya.
 
+ATURAN EKSEKUSI (WAJIB DITAATI):
+1. BACA INTENT PENGGUNA (ADAPTIF):
+   - MODE EKSEKUSI: Jika user meminta tindakan langsung (contoh: "tolong ubah UI", "fix bug ini", "tambahkan fitur"), EKSEKUSI DULU, JELASKAN NANTI. Jangan pernah menjawab dengan daftar rencana atau bilang "saya akan...". Langsung panggil tools (read_file, search_code, write_file) secara berurutan. Analisis = aksi, bukan omongan.
+   - MODE DISKUSI: Jika user secara eksplisit mengajak diskusi, bertanya konsep, atau memberi instruksi "jangan ngoding dulu/jangan eksekusi", maka TAHAN SEMUA TOOLS. Jadilah teman diskusi yang baik dan jangan memanggil fungsi modifikasi file sampai user memberikan lampu hijau.
+2. KONFIRMASI HANYA UNTUK HAL BERISIKO: Minta konfirmasi hanya sebelum write_file (sudah otomatis via diff preview). Untuk baca, cari, dan analisis — langsung eksekusi tanpa izin.
+3. JAWAB SINGKAT: Setelah proses eksekusi kode selesai, rangkum hasilnya dalam 1-3 kalimat pendek. Jangan ulangi apa yang sudah jelas terlihat dari kode atau diff preview.
+
 KEMAMPUAN TOOLS:
 Kamu punya akses ke beberapa tools untuk membaca dan memodifikasi kode:
 - read_file: Baca isi file
@@ -87,8 +95,7 @@ Kamu punya akses ke beberapa tools untuk membaca dan memodifikasi kode:
 - search_code: Cari teks di dalam project (exact match)
 - search_codebase: Cari kode yang relevan secara semantik (RAG)
 
-Gunakan tools ini secara proaktif ketika user meminta bantuan terkait kode.
-Jangan minta user untuk menunjukkan isi file — langsung baca sendiri pakai tool!
+Gunakan tools ini secara proaktif ketika berada di MODE EKSEKUSI. Jangan minta user untuk menunjukkan isi file — langsung baca sendiri pakai tool!
 """
 
 
@@ -165,9 +172,14 @@ def agent_loop(llm, messages, system_prompt):
     sampai akhirnya LLM berkata "Oke aku sudah punya jawaban akhir" (end_turn).
     """
     loop_count = 0
+    MAX_LOOPS = 50  # Guard: cegah infinite loop
 
     while True:
         loop_count += 1
+        if loop_count > MAX_LOOPS:
+            debug(f"⚠️ Max loops ({MAX_LOOPS}) tercapai, force stop.", tag="AGENT")
+            console.print("[yellow]Agent loop mencapai batas iterasi. Menghentikan...[/yellow]")
+            return "(Agent dihentikan karena terlalu banyak iterasi)"
         debug_separator(f"AGENT LOOP — Iterasi #{loop_count}")
 
         # STEP 1: Context Management
@@ -203,11 +215,16 @@ def agent_loop(llm, messages, system_prompt):
 
             jawaban = ""
             for block in response.content:
-                if hasattr(block, "text"):
+                if hasattr(block, "text") and block.text:
                     jawaban += block.text
 
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "assistant", "content": content_to_dict(response.content)})
             debug_separator("AGENT LOOP SELESAI")
+
+            if not jawaban:
+                debug(f"⚠️ end_turn tapi tidak ada text. Blocks: {len(response.content)}", tag="AGENT")
+                debug(f"  Block types: {[b.type for b in response.content]}", tag="AGENT")
+                return "(Agent selesai tapi tidak ada respon teks. Coba ulangi pertanyaan mas rusdi.)"
 
             return jawaban
 
@@ -221,7 +238,7 @@ def agent_loop(llm, messages, system_prompt):
             text_blocks = [b for b in response.content if hasattr(b, "text") and b.text]
             debug(f"  Content blocks: {len(tool_blocks)} tool_use, {len(text_blocks)} text", tag="AGENT")
 
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "assistant", "content": content_to_dict(response.content)})
 
             for block in text_blocks:
                 debug(f"  💭 Pemikiran LLM: \"{block.text[:100]}...\"", tag="AGENT")
@@ -230,9 +247,9 @@ def agent_loop(llm, messages, system_prompt):
             tool_results = []
 
             for idx, block in enumerate(tool_blocks, 1):
-                tool_name = block.name
-                tool_input = block.input
-                tool_use_id = block.id
+                tool_name = block.tool_name
+                tool_input = block.tool_input
+                tool_use_id = block.tool_use_id
 
                 debug_separator(f"TOOL #{idx}: {tool_name}")
                 debug(f"  Nama : {tool_name}", tag="AGENT")
@@ -245,6 +262,7 @@ def agent_loop(llm, messages, system_prompt):
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tool_use_id,
+                            "_tool_name": tool_name,
                             "content": "User menolak eksekusi tool ini."
                         })
                         continue
@@ -264,6 +282,7 @@ def agent_loop(llm, messages, system_prompt):
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
+                    "_tool_name": tool_name,
                     "content": result,
                 })
 
@@ -276,10 +295,10 @@ def agent_loop(llm, messages, system_prompt):
         debug(f"⚠️ stop_reason tidak dikenali: \"{response.stop_reason}\"", tag="AGENT")
         jawaban = ""
         for block in response.content:
-            if hasattr(block, "text"):
+            if hasattr(block, "text") and block.text:
                 jawaban += block.text
-        messages.append({"role": "assistant", "content": response.content})
-        return jawaban if jawaban else "(Tidak ada respon)"
+        messages.append({"role": "assistant", "content": content_to_dict(response.content)})
+        return jawaban if jawaban else f"(stop_reason tidak dikenali: {response.stop_reason})"
 
 
 def _format_params(params):

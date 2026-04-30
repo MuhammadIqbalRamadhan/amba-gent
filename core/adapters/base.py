@@ -94,6 +94,36 @@ class UnifiedResponse:
 # BASE ADAPTER — Interface/Kontrak untuk semua adapter
 # ============================================================
 
+def content_to_dict(content):
+    """
+    Convert list of UnifiedContentBlock ke list of dict (JSON-serializable).
+
+    Dipakai sebelum append ke messages, karena adapter SDK
+    butuh format yang bisa di-JSON-serialize.
+
+    Mapping:
+      UnifiedContentBlock(type="text")     → {"type": "text", "text": "..."}
+      UnifiedContentBlock(type="tool_use") → {"type": "tool_use", "name": ..., "input": ..., "id": ...}
+    """
+    result = []
+    for block in content:
+        if isinstance(block, dict):
+            result.append(block)
+        elif isinstance(block, UnifiedContentBlock):
+            if block.type == "text":
+                result.append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                result.append({
+                    "type": "tool_use",
+                    "name": block.tool_name,
+                    "input": block.tool_input,
+                    "id": block.tool_use_id,
+                })
+        else:
+            result.append({"type": "text", "text": str(block)})
+    return result
+
+
 class BaseLLMAdapter(ABC):
     """
     Abstract Base Class untuk semua LLM adapter.

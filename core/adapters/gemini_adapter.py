@@ -240,13 +240,18 @@ class GeminiAdapter(BaseLLMAdapter):
             # --- Kasus 2: content berupa list (blocks/tool_results) ---
             elif isinstance(content, list):
                 for item in content:
+                    if item is None:
+                        continue
+
                     # Sub-kasus A: tool_result (dict dari agent_loop)
                     if isinstance(item, dict) and item.get("type") == "tool_result":
-                        # Anthropic tool_result → Gemini FunctionResponse
+                        result_content = item.get("content", "")
+                        if not isinstance(result_content, str):
+                            result_content = str(result_content)
                         parts.append(types.Part(
                             function_response=types.FunctionResponse(
                                 name=item.get("_tool_name", "unknown"),
-                                response={"result": item.get("content", "")}
+                                response={"result": result_content}
                             )
                         ))
 
@@ -256,12 +261,15 @@ class GeminiAdapter(BaseLLMAdapter):
                         if text_val:
                             parts.append(types.Part(text=text_val))
 
-                    # Sub-kasus C: tool_use dict (dari session resume)
+                    # Sub-kasus C: tool_use dict (dari session resume / content_to_dict)
                     elif isinstance(item, dict) and item.get("type") == "tool_use":
+                        args = item.get("input", {})
+                        if not isinstance(args, dict):
+                            args = {"value": str(args)}
                         parts.append(types.Part(
                             function_call=types.FunctionCall(
                                 name=item.get("name", ""),
-                                args=item.get("input", {}),
+                                args=args,
                             )
                         ))
 
@@ -409,43 +417,63 @@ class GeminiAdapter(BaseLLMAdapter):
         """
         unified_blocks = []
         has_function_call = False
-
-        # Counter untuk generate tool_use_id
-        # (Anthropic punya ID unik per tool call, Gemini tidak)
         call_counter = 0
 
-        # Gemini response ada di response.candidates[0].content.parts
-        if response.candidates and response.candidates[0].content:
-            for part in response.candidates[0].content.parts:
+        # Guard: response bisa None, candidates bisa None/empty
+        if not response.candidates:
+            debug("  [Gemini] WARNING: response.candidates is None/empty", tag="LLM")
+            return UnifiedResponse(
+                stop_reason="end_turn",
+                content=[UnifiedContentBlock(type="text", text="(Gemini tidak mengembalikan respon)")],
+                raw_response=response,
+            )
 
-                # --- Kasus 1: Teks biasa ---
-                if part.text:
-                    debug(f"  [Gemini] Part: TEXT \"{part.text[:80]}...\"", tag="LLM")
-                    unified_blocks.append(UnifiedContentBlock(
-                        type="text",
-                        text=part.text,
-                    ))
+        candidate = response.candidates[0]
+        if not candidate or not candidate.content:
+            debug("  [Gemini] WARNING: candidate.content is None", tag="LLM")
+            return UnifiedResponse(
+                stop_reason="end_turn",
+                content=[UnifiedContentBlock(type="text", text="(Gemini tidak mengembalikan konten)")],
+                raw_response=response,
+            )
 
-                # --- Kasus 2: Function call (tool_use) ---
-                elif part.function_call:
-                    has_function_call = True
-                    fc = part.function_call
+        parts = candidate.content.parts or []
+        for part in parts:
 
-                    # Generate ID unik untuk tool call ini
-                    tool_id = f"gemini_call_{call_counter}"
-                    call_counter += 1
+            # --- Kasus 1: Teks biasa ---
+            if hasattr(part, "text") and part.text:
+                debug(f"  [Gemini] Part: TEXT \"{part.text[:80]}...\"", tag="LLM")
+                unified_blocks.append(UnifiedContentBlock(
+                    type="text",
+                    text=part.text,
+                ))
 
-                    debug(f"  [Gemini] Part: FUNCTION_CALL {fc.name}(args={fc.args})", tag="LLM")
+            # --- Kasus 2: Function call (tool_use) ---
+            elif hasattr(part, "function_call") and part.function_call:
+                has_function_call = True
+                fc = part.function_call
 
-                    unified_blocks.append(UnifiedContentBlock(
-                        type="tool_use",
-                        tool_name=fc.name,
-                        tool_input=dict(fc.args) if fc.args else {},
-                        tool_use_id=tool_id,
-                    ))
+                tool_id = f"gemini_call_{call_counter}"
+                call_counter += 1
+
+                debug(f"  [Gemini] Part: FUNCTION_CALL {fc.name}(args={fc.args})", tag="LLM")
+
+                unified_blocks.append(UnifiedContentBlock(
+                    type="tool_use",
+                    tool_name=fc.name,
+                    tool_input=dict(fc.args) if fc.args else {},
+                    tool_use_id=tool_id,
+                ))
+
+        # Fallback: tidak ada block sama sekali
+        if not unified_blocks:
+            debug("  [Gemini] WARNING: tidak ada text atau function_call di response", tag="LLM")
+            unified_blocks.append(UnifiedContentBlock(
+                type="text",
+                text="(Gemini tidak menghasilkan konten)",
+            ))
 
         # Tentukan stop_reason
-        # Gemini tidak punya field ini secara eksplisit, jadi kita deduksi
         stop_reason = "tool_use" if has_function_call else "end_turn"
         debug(f"  [Gemini] Deduced stop_reason: {stop_reason}", tag="LLM")
 
