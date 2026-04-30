@@ -1,76 +1,205 @@
-# 🤖 Amba-gent
+# Amba-Gent
 
-Amba-gent adalah asisten AI Engineer pribadi berbasis *Command Line Interface* (CLI) yang terintegrasi langsung dengan mesin komputer dan proyek yang sedang Anda kerjakan. Didesain secara spesifik layaknya rekan kerja *Full-Stack Developer*, Amba-gent mampu memahami, mencari, dan mengedit file secara mandiri di dalam proyek Anda dengan arsitektur *Agentic Loop*.
+AI Coding Agent berbasis CLI yang terintegrasi langsung dengan file-system dan proyek Anda. Bekerja layaknya rekan kerja Full-Stack Developer mampu membaca, mencari, dan mengedit file secara mandiri lewat arsitektur Agentic Loop.
 
 ---
 
-## ✨ Fitur Utama
+## Fitur
 
-- **🧠 Agentic Loop Execution**
-  Berbeda dari sekadar model chatbot standar, Amba-gent bekerja layaknya agen. Untuk satu kueri pengguna seperti "Perbaiki bug auth", agen mampu berpikir, menemukan file konfigurasi yang tepat, membaca kodenya, merancang aksi, menimpa file dengan kode perbaikan, dan merangkum hasil kerja secara sirkular.
+### Multi-LLM Provider
 
-- **🛠️ Penggunaan Tool Lokal Otomatis (*Tool Calling*)**
-  Dilengkapi beragam tool khusus untuk membaca dan mengubah *file-system*:
-  - **`read_file`**: Membaca isi detail code dalam suatu modul.
-  - **`write_file`**: Membuat file baru atau menimpa modifikasi kode.
-  - **`list_directory`**: Menjelajahi struktur file (seperti tree explorer) dari direktori tertentu.
-  - **`search_code`**: Fitur *Find in Files* (Grep literal) untuk mencari teks secara case-insensitive lintas direktori kode.
+Support Anthropic dan Google Gemini via adapter pattern. Setiap provider punya adapter sendiri yang menerjemahkan format API ke `UnifiedResponse` standar.
 
-- **📚 TF-IDF RAG Engine (`search_codebase`)**
-  Amba-gent dibekali mesin berbasis Retrieval-Augmented Generation secara mandiri dengan algoritma *TF-IDF* tanpa bergantung pada service vektor luar. Agent dapat mengekstrak logika dari dokumen-dokumen yang secara *semantik* sangat krusial dengan mem-parsing kode.
+```bash
+# Default (Anthropic via proxy)
+py -3 main.py
 
-- **🛡️ Fitur Keamanan dan HitL (Human-in-the-loop)**
-  Amba-gent transparan! Jika memutuskan untuk mengubah isi project (memanggil file berisiko tinggi seperti `write_file`), mesin akan mengonfirmasi tindakan tersebut kepada user via prompt. Anda tidak perlu khawatir agent tiba-tiba merusak komponen krusial.
+# Switch ke Gemini
+py -3 main.py --provider gemini --model gemini-2.0-flash
 
-- **🧠 Smart Context Management**
-  Otomatis mengatur dan memangkas ukuran token LLM. Jika sejarah percakapan / memori terminal menjadi terlalu besar, arsitektur *Context Window* akan membuang memori paling usang secara aman, menjamin respon tetap konstan.
+# Switch ke Anthropic dengan model spesifik
+py -3 main.py --provider anthropic --model glm-5
+```
 
-- **🐛 Transparansi Pikiran (Watchlist & Debug Mode)**
-  Sebuah sakelar toggle `DEBUG_MODE=True`, memperbolehkan pengguna melihat visualisasi bagaimana "otak" representatif mesin menganalisis problem dari 1 hingga proses pengembalian pesan secara elegan.
+> **Note:** `--provider` dan `--model` HARUS dipakai bersamaan untuk switch LLM.
 
-- **🌊 Streaming Output (Typewriter Effect)**
-  Tampilan jawaban akhir AI diproses secara elegan dengan memberikan efek "mengetik" menggunakan sinkronisasi waktu dan *Rich Live* render, memberikan Anda *User Experience* interaksi natural alih-alih menampilkan blok teks kaku.
+### Agentic Loop
 
-- **💾 Manajemen Sesi Persisten (Auto-Save)**
-  Setiap interaksi obrolan akan otomatis tersimpan ke dalam format penyimpanan lokal di `sessions/`. Anda dapat menggunakan perintah argument `--resume` untuk meneruskan konteks riwayat percakapan secara mulus meskipun aplikasi sempat tertutup!
+Bukan chatbot biasa. Satu query bisa trigger multiple tool calls secara sirkular sampai tugas selesai. Contoh: "Fix bug auth" → agent cari file → baca kode → analisa → tulis perbaikan → rangkum hasil.
 
-- **🤖 Deteksi Lingkungan Project (Auto-Context)**
-  Sistem dibekali kemampuan "merasakan" direktori kerjanya secara mandiri. AI mendeteksi status Git-enabled maupun bahasa dominan (Python, JS, etc.) yang sedang diawasi lalu menyuntikkan *system prompt* yang dinamis dan relevan terhadap kode Anda secara cerdas.
+### Tool Calling
 
-## 🚀 Persiapan dan Cara Instalasi
+| Tool | Fungsi | Konfirmasi |
+|------|--------|-----------|
+| `read_file` | Baca isi file | Tidak |
+| `write_file` | Tulis/buat file + diff preview | Ya |
+| `list_directory` | Jelajahi struktur folder | Tidak |
+| `search_code` | Grep literal case-insensitive | Tidak |
+| `search_codebase` | Semantic search via TF-IDF RAG | Tidak |
 
-Pastikan Anda memiliki instalasi Python 3.11 atau ke atas.
+### RAG (Retrieval-Augmented Generation) Engine
 
-1. **Persiapkan Environment**
-   Setel *virtual environment* Python agar dependensi lebih tertata:
+Pencarian semantik berbasis TF-IDF yang berjalan sepenuhnya lokal tanpa model embedding atau API eksternal.
+
+**Cara kerja:**
+
+```
+INDEXING (sekali saat startup)
+  Codebase → scan file → pecah per 30 baris (chunk) → tokenize → hitung TF-IDF → simpan di memory
+
+RETRIEVAL (setiap query via search_codebase)
+  Query → tokenize → skor TF-IDF per chunk → ranking → return top-K hasil
+```
+
+**Kenapa TF-IDF bukan embedding?**
+- Pencarian kode kebanyakan exact match (nama fungsi, variabel, class)
+- TF-IDF ringan, cepat, zero dependency
+- Embedding butuh model tambahan, lebih berat, untuk kode tidak se-signifikan
+
+**Konsep TF-IDF:**
+- **TF (Term Frequency)** = seberapa sering kata muncul di chunk ini
+- **IDF (Inverse Document Frequency)** = seberapa jarang kata di seluruh codebase
+- Kata unik (`authenticate`) → skor tinggi. Kata umum (`import`) → skor rendah
+
+**File yang di-index:** 40+ ekstensi meliputi Python, JS/TS, Go, Rust, Java, C/C++, PHP, Ruby, config files (JSON, YAML, TOML), SQL, Markdown, dan lainnya.
+
+**Folder yang di-skip:** `.git`, `node_modules`, `venv`, `__pycache__`, `build`, `dist`, `vendor`, `.vscode`, `.idea`, dan lainnya.
+
+**Contoh:**
+```
+User: "Di mana logika authentication?"
+→ search_codebase("authentication logic")
+→ RAG: ditemukan di auth.py baris 45-75 (skor 2.8)
+→ LLM jawab berdasarkan kode yang ditemukan
+```
+
+### Smart Context Management
+
+Otomatis atur dan pangkas token. History percakapan terlalu panjang → context window buang pesan paling usang, respon tetap stabil.
+
+### Session Management (Auto-Save)
+
+Percakapan otomatis tersimpan di `sessions/`. Gunakan `--resume` untuk lanjutkan.
+
+### Diff Preview
+
+Sebelum `write_file` dieksekusi, tampil diff ala git baris merah (dihapus), hijau (ditambah). User konfirmasi (y/n) dulu.
+
+### Project Auto-Detection
+
+Deteksi otomatis: Git status, bahasa dominan (Python, JS, etc.), framework. Info disuntikkan ke system prompt.
+
+### Streaming Output
+
+Jawaban ditampilkan dengan typewriter effect via Rich Live render.
+
+---
+
+## CLI Reference
+
+```
+usage: amba-gent [-h] [--resume] [--provider {anthropic,gemini}] [--model MODEL] [--debug]
+
+options:
+  -h, --help            show this help message and exit
+  --resume              Lanjutkan sesi percakapan terakhir yang tersimpan
+  --provider            Pilih LLM provider: anthropic, gemini
+  --model MODEL         Override nama model
+  --debug               Aktifkan debug mode
+```
+
+Contoh:
+```bash
+py -3 main.py                                              # Sesi baru, provider default
+py -3 main.py --resume                                     # Lanjutkan sesi terakhir
+py -3 main.py --provider gemini --model gemini-2.0-flash   # Switch ke Gemini
+py -3 main.py --provider anthropic --model glm-5           # Switch ke Anthropic
+py -3 main.py --debug                                      # Debug mode
+```
+
+---
+
+## Instalasi
+
+**Prasyarat:** Python 3.11+
+
+1. **Clone & masuk direktori**
    ```bash
-   python -m venv venv
-   # Source activate di Windows:
+   git clone <repo-url> amba-gent && cd amba-gent
+   ```
+
+2. **Virtual environment**
+   ```bash
+   py -3 -m venv venv
    .\venv\Scripts\activate
    ```
 
-2. **Dapatkan Dependencies yang Diperlukan**
-   Sistem mewajibkan library berikut (seperti Rich, ZhipuAI, dll):
+3. **Install dependencies**
    ```bash
-   pip install typer zhipuai python-dotenv rich
+   py -3 -m pip install anthropic python-dotenv rich google-genai
    ```
 
-3. **Konfigurasi Lingkungan (Env)**
-   Silakan duplikasikan `.env-example` menjadi `.env` dan letakkan credential / API Key Zhipu / GLM4 ke dalam file tersebut sebelum eksekusi.
-
-4. **Jalankan Amba-gent**
+4. **Konfigurasi `.env`**
    ```bash
-   # Masuk ke portal Amba-gent dan mulai task baru
+   cp .env-example .env
+   ```
+   Edit `.env`:
+   ```env
+   # Anthropic (atau proxy)
+   API_KEY=your-key-here
+   BASE_URL=https://api.z.ai/api/anthropic
+   MODEL=glm-5
+
+   # Gemini (opsional — cukup isi salah satu)
+   GEMINI_API_KEY=your-gemini-key
+   GEMINI_MODEL=gemini-2.0-flash
+
+   # Provider default
+   PROVIDER=anthropic
+
+   # Debug
+   DEBUG=false
+   ```
+
+5. **Jalankan**
+   ```bash
    py -3 main.py
-
-   # Atau, teruskan percakapan sebelumnya jika ada project yang belum tuntas:
-   py -3 main.py --resume
    ```
-
-   **💡 TIPS PRO (Penggunaan Lintas-Project):** Anda telah dapat memanggil `amba-gent` langsung di PowerShell manapun menggunakan ALIAS GLOBAL! 
-   Hanya dengan mengetikkan perintah `ambagent` di dalam terminal dari modul lain yang sedang Anda kerjakan, AI akan datang dan menganalisa direktori spesifik tersebut seketika.
-
-5. Interaksikan langsung dengan mengetik instruksi. Anda bisa menggunakan *"Tolong beri komentar di auth.py"* atau *"Cari modul untuk parsing log"*. 
 
 ---
-*Amba-gent – A Personal AI Engineer crafted specially for Mas Rusdi.*
+
+## Arsitektur
+
+```
+main.py                  Entry point + argparse CLI
+config.py                Env config (multi-provider)
+core/
+  adapters/
+    base.py              BaseLLMAdapter (ABC) + UnifiedResponse
+    anthropic_adapter.py Adapter untuk Anthropic API
+    gemini_adapter.py    Adapter untuk Google Gemini API
+  llm_client.py          Factory: create_llm_client(provider, model)
+  context.py             Context window management
+  session.py             Session save/load (JSON)
+  project.py             Auto-detect project type
+  logger.py              Debug logger
+tools/
+  definitions.py         Tool schema (JSON Schema)
+  executor.py            Tool execution dispatcher
+  file_tools.py          File ops (read, write, diff)
+  search_tools.py        Grep + RAG search
+rag/
+  indexer.py             TF-IDF indexer (chunking, tokenizing, scoring)
+  retriever.py           Search wrapper + result formatter
+```
+
+**Flow:**
+```
+User input → agent_loop → LLM (via adapter) → tool_use? → execute → loop
+                         ↓ end_turn
+                         → stream_display → user
+```
+
+---
+
+*Amba-Gent — Personal AI Engineer for Mas Rusdi.*

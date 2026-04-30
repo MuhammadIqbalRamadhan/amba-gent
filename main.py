@@ -12,16 +12,60 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.live import Live
 from rich.text import Text
+import argparse
 import sys
 
-from core.llm_client import LLMClient
+from core.llm_client import create_llm_client
 from core.context import ContextManager
 from core.session import SessionManager
 from core.project import detect_project, generate_project_context
 from core.logger import debug, debug_separator, console
-from config import DEBUG
+from config import DEBUG, DEFAULT_PROVIDER
 from tools.definitions import TOOLS, DANGEROUS_TOOLS
 from tools.executor import execute_tool
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="amba-gent",
+        description="Amba-Gent — AI Coding Agent dengan multi-LLM support",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Contoh:\n"
+            "  py -3 main.py                                        Mulai sesi baru (provider default)\n"
+            "  py -3 main.py --resume                               Lanjutkan sesi terakhir\n"
+            "  py -3 main.py --provider gemini --model gemini-2.0-flash   Switch ke Gemini\n"
+            "  py -3 main.py --provider anthropic --model glm-5           Switch ke Anthropic\n"
+            "  py -3 main.py --debug                                Aktifkan debug mode\n"
+            "\n"
+            "NOTE: --provider dan --model HARUS dipakai bersamaan untuk switch LLM."
+        ),
+    )
+
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Lanjutkan sesi percakapan terakhir yang tersimpan",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["anthropic", "gemini"],
+        default=None,
+        help=f"Pilih LLM provider (default: {DEFAULT_PROVIDER})",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Override nama model (contoh: gemini-2.0-flash, claude-sonnet-4-6)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Aktifkan debug mode (tampilkan log detail)",
+    )
+
+    return parser.parse_args()
 
 
 # ============================================================
@@ -311,10 +355,29 @@ def main():
     """
     Entry point utama amba-gent.
     """
+    args = parse_args()
+
+    # Debug flag: CLI flag override .env
+    if args.debug:
+        import config
+        config.DEBUG = True
+
+    # Validasi: --provider dan --model harus dipakai bersamaan
+    has_provider = args.provider is not None
+    has_model = args.model is not None
+    if has_provider != has_model:
+        console.print("[bold red]Error:[/bold red] --provider dan --model HARUS dipakai bersamaan.")
+        console.print("[dim]Contoh: py -3 main.py --provider gemini --model gemini-2.0-flash[/dim]")
+        sys.exit(1)
+
     debug_separator("AMBA-GENT STARTUP")
     debug(f"Debug mode: {'AKTIF ✅' if DEBUG else 'NONAKTIF'}", tag="STARTUP")
 
-    # (.4) Deteksi project
+    # Provider & model — pakai default kalau tidak di-specify
+    provider = args.provider or DEFAULT_PROVIDER
+    debug(f"Provider: {provider}, Model: {args.model or 'default'}", tag="STARTUP")
+
+    # Deteksi project
     debug("Mendeteksi jenis project...", tag="STARTUP")
     system_prompt = build_system_prompt()
 
@@ -330,11 +393,13 @@ def main():
         )
     )
 
-    # Inisialisasi LLM client
+    # Inisialisasi LLM client via factory
     debug("Inisialisasi LLM client...", tag="STARTUP")
     try:
-        llm = LLMClient()
+        llm = create_llm_client(provider=provider, model=args.model)
         console.print("[green]✓ Terhubung ke LLM[/green]")
+        console.print(f"[dim]  Provider  : {llm.provider_name}[/dim]")
+        console.print(f"[dim]  Model     : {llm.model_name}[/dim]")
         console.print(f"[dim]  Tools aktif: {', '.join(t['name'] for t in TOOLS)}[/dim]")
         console.print(f"[dim]  Debug mode : {'AKTIF' if DEBUG else 'NONAKTIF'}[/dim]\n")
     except Exception as e:
@@ -342,11 +407,10 @@ def main():
         console.print(f"[bold red]✗ Gagal koneksi:[/bold red] {e}")
         return
 
-    # (.3) Session management — cek apakah mau resume
+    # Session management
     messages = []
-    resume_mode = "--resume" in sys.argv
 
-    if resume_mode:
+    if args.resume:
         debug("Mode resume: memuat session terakhir...", tag="SESSION")
         loaded = session_mgr.load_latest()
         if loaded:
